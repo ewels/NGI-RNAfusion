@@ -1,6 +1,8 @@
+"""Module for Graph"""
 class Graph:
-    def __init__(self, id, title, subtitle, data):
-        self.id = id
+    """Interface for Graph"""
+    def __init__(self, graph_id, title, subtitle, data):
+        self.graph_id = graph_id
         self.title = title
         self.subtitle = subtitle
         self.graph = data

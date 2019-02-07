@@ -32,6 +32,7 @@
         <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pb-2 mb-3 border-bottom">
             <h1 class="h3">{{ sections['fusion_list'].title }}</h1>
         </div>
+        <p>{{ sections['fusion_list'].content | safe }}</p>
         <table id="fusion_list_table" class="table table-hover table-striped table-bordered">
             <thead>
                 <th>Fusion gene</th>
@@ -89,6 +90,7 @@
     </section>
 </main>
 
+{% set distribution_chart_colors_length = sections['dashboard'].graphs['distribution_chart'].graph | length %}
 <script>
     $(document).ready(function () {
         $('#fusion_list_table').DataTable({
@@ -235,7 +237,7 @@
                 size: '110%'
             }
         },
-        colors: colorbrewer.Oranges[{{ sections['dashboard'].graphs['distribution_chart'].graph | length }}],
+        {% if distribution_chart_colors_length > 2 %} colors: colorbrewer.Oranges[{{ distribution_chart_colors_length}}], {% endif %}
         series: [{
             type: 'pie',
             name: 'Count',

@@ -9,38 +9,58 @@
 ----------------------------------------------------------------------------------------
 */
 
+nfcore_logo = """=======================================================
+                                          ,--./,-.
+          ___     __   __   __   ___     /,-._.--~\'
+    |\\ | |__  __ /  ` /  \\ |__) |__         }  {
+    | \\| |       \\__, \\__/ |  \\ |___     \\`-._,-`-,
+                                          `._,._,\'
+
+nf-core/rnafusion v${workflow.manifest.version}
+======================================================="""
+
 def helpMessage() {
-    log.info"""
-    =========================================
-     nf-core/rnafusion v${workflow.manifest.version}
-    =========================================
+    nfcore_help = """
     Usage:
 
     The typical command for running the pipeline is as follows:
 
-    nextflow run nf-core/rnafusion --reads '*_R{1,2}.fastq.gz' -profile standard,docker
+    nextflow run nf-core/rnafusion --reads '*_R{1,2}.fastq.gz' -profile docker
 
     Mandatory arguments:
       --reads                       Path to input data (must be surrounded with quotes)
-      --genome                      Name of iGenomes reference
       -profile                      Configuration profile to use. Can use multiple (comma separated)
                                     Available: standard, conda, docker, singularity, awsbatch, test
 
-    Options:
-      --singleEnd                   Specifies that the input is single end reads
-      --star_fusion                 [bool] Run STAR-Fusion. Default: False
-      --fusioncatcher               [bool] Run FusionCatcher. Default: False
+    Tool flags:
+      --star_fusion                 Run STAR-Fusion
+      --fusioncatcher               Run FusionCatcher
         --fc_extra_options          Extra parameters for FusionCatcher. Can be found at https://github.com/ndaniel/fusioncatcher/blob/master/doc/manual.md
-      --fusion_inspector            [bool] Run Fusion-Inspectro. Default: False
-      --ericscript                  [bool] Run Ericscript. Default: False
-      --pizzly                      [Bool] Run Pizzly. Default: False
-      --squid                       [Bool] Run Squid. Default: False
-      --test                        [bool] Run in test mode
+      --ericscript                  Run Ericscript
+      --pizzly                      Run Pizzly
+      --squid                       Run Squid
+      --test                        Runs only specific fusion tool/s and not the whole pipeline. Only works on tool flags.
+      --tool_cutoff                 Number of tools to pass threshold required for showing fusion in the report. [Default = 2]
+
+    Visualization flags:
+      --fusion_inspector            Run Fusion-Inspector
 
     References                      If not specified in the configuration file or you wish to overwrite any of the references.
       --fasta                       Path to Fasta reference
+      --gtf                         Path to GTF annotation
+      --star_index                  Path to STAR-Index reference
+      --star_fusion_ref             Path to STAR-Fusion reference
+      --fusioncatcher_ref           Path to Fusioncatcher reference
+      --ericscript_ref              Path to Ericscript reference
+      --pizzly_fasta                Path to Pizzly FASTA reference
+      --pizzly_gtf                  Path to Pizzly GTF annotation
 
-    Other options:
+    Options:
+      --genome                      Name of iGenomes reference
+      --read_length                 Length of the reads. Default: 100
+      --singleEnd                   Specifies that the input is single end reads
+
+    Other Options:
       --outdir                      The output directory where the results will be saved
       --email                       Set this parameter to your e-mail address to get a summary e-mail with details of the run sent to you when the workflow exits
       -name                         Name for the pipeline run. If not specified, Nextflow will automatically generate a random mnemonic.
@@ -49,6 +69,7 @@ def helpMessage() {
       --awsqueue                    The AWSBatch JobQueue that needs to be set when running on AWSBatch
       --awsregion                   The AWS Region for your AWS Batch job to run on
     """.stripIndent()
+    log.info "${nfcore_logo}${nfcore_help}"
 }
 
 /*
@@ -63,16 +84,24 @@ if (params.help){
 
 // Configurable variables
 params.name = false
-params.test = false
 params.fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
 params.gtf = params.genome ? params.genomes[ params.genome ].gtf ?: false : false
-params.star_index = params.genome ? params.genomes[ params.genome ].star ?: false : false
+params.running_tools = []
 params.multiqc_config = "$baseDir/conf/multiqc_config.yaml"
 params.email = false
 params.plaintext_email = false
 
 multiqc_config = file(params.multiqc_config)
 output_docs = file("$baseDir/docs/output.md")
+
+// Reference variables required by tools
+// These are needed in order to run the pipeline
+pizzly_fasta = false
+pizzly_gtf = false
+star_fusion_ref = false
+fusioncatcher_ref = false
+fusion_inspector_ref = false
+ericscript_ref = false
 
 // AWSBatch sanity checking
 if(workflow.profile == 'awsbatch'){
@@ -95,13 +124,11 @@ if( workflow.profile == 'awsbatch') {
 
 // Validate pipeline variables
 // These variable have to be defined in the profile configuration which is referenced in nextflow.config
-if (!params.genome) {
-    exit 1, "Mandatory parameter genome not specified!"    
-}
-
 if (params.fasta) {
     fasta = file(params.fasta)
     if(!fasta.exists()) exit 1, "Fasta file not found: ${params.fasta}"
+} else {
+    if (!params.genome) exit 1, "You have to specify either fasta file or Genome version!"
 }
 
 if (params.gtf) {
@@ -109,47 +136,30 @@ if (params.gtf) {
     if(!gtf.exists()) exit 1, "GTF file not found: ${params.fasta}"
 }
 
-if(params.star_index){
-    star_index = Channel
-        .fromPath(params.star_index)
-        .ifEmpty { exit 1, "STAR index not found: ${params.star_index}" }
-}
-
-star_fusion_ref = ''
 if (params.star_fusion) {
+    params.running_tools.add("STAR-Fusion")
     if (!params.star_fusion_ref) {
         exit 1, "Star-Fusion reference not specified!"
     } else {
         star_fusion_ref = Channel
             .fromPath(params.star_fusion_ref)
-            .ifEmpty { exit 1, "Stat-Fusion reference directory not found!" }
+            .ifEmpty { exit 1, "Star-Fusion reference directory not found!" }
     }
 }
 
-fusioncatcher_ref = ''
 if (params.fusioncatcher) {
+    params.running_tools.add("Fusioncatcher")
     if (!params.fusioncatcher_ref) {
-        exit 1, "Fusion catcher data directory not specified!"
+        exit 1, "Fusioncatcher data directory not specified!"
     } else {
         fusioncatcher_ref = Channel
             .fromPath(params.fusioncatcher_ref)
-            .ifEmpty { exit 1, "Fusion catcher data directory not found!" }
+            .ifEmpty { exit 1, "Fusioncatcher data directory not found!" }
     }
 }
 
-fusion_inspector_ref = ''
-if (params.fusion_inspector) {
-    if (!params.star_fusion_ref) {
-        exit 1, "Reference not specified (using star-fusion reference path)!"
-    } else {
-        fusion_inspector_ref = Channel
-            .fromPath(params.star_fusion_ref)
-            .ifEmpty { exit 1, "Fusion-Inspector reference not found" }
-    }
-}
-
-ericscript_ref = ''
 if (params.ericscript) {
+    params.running_tools.add("Ericscript")
     if (!params.ericscript_ref) {
         exit 1, "Reference not specified!"
     } else {
@@ -159,65 +169,57 @@ if (params.ericscript) {
     }
 }
 
-pizzly_fasta = ''
-pizzly_gtf = ''
 if (params.pizzly) {
-    if (!params.pizzly_ref) {
-        exit 1, "No pizzly reference folder defined"
-    } else {
+    params.running_tools.add("Pizzly")
+    if (params.pizzly_fasta) {
         pizzly_fasta = Channel
-            .fromPath("$params.pizzly_ref/Homo_sapiens.GRCh38.cdna.all.fa.gz")
-            .ifEmpty { exit 1, "FASTA file not found!" }
+            .fromPath(params.pizzly_fasta)
+            .ifEmpty { exit 1, "Pizzly FASTA file not found!" }
+    }
+
+    if (params.pizzly_gtf) {
         pizzly_gtf = Channel
-            .fromPath("$params.pizzly_ref/Homo_sapiens.GRCh38.94.gtf")
-            .ifEmpty { exit 1, "GTF file not found!" }
+            .fromPath(params.pizzly_gtf)
+            .ifEmpty { exit 1, "Pizzly GTF file not found!" }
+    }
+}
+
+if (params.squid) {
+    params.running_tools.add("Squid")
+}
+
+if (params.fusion_inspector) {
+    params.running_tools.add("FusionInspector")
+    if (!params.star_fusion_ref) {
+        exit 1, "Reference not specified (using star-fusion reference path)!"
+    } else {
+        fusion_inspector_ref = Channel
+            .fromPath(params.star_fusion_ref)
+            .ifEmpty { exit 1, "Fusion-Inspector reference not found" }
     }
 }
 
 /*
  * Create a channel for input read files
  */
- if(params.readPaths){
-     if(params.singleEnd){
-         Channel
-             .from(params.readPaths)
-             .map { row -> [ row[0], [file(row[1][0])]] }
-             .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-             .into { read_files_fastqc; read_files_summary; read_files_multiqc; read_files_star_fusion; read_files_fusioncatcher; 
-                     read_files_gfusion; read_files_fusion_inspector; read_files_ericscript; read_files_pizzly; read_files_squid }
-     } else {
-         Channel
-             .from(params.readPaths)
-             .map { row -> [ row[0], [file(row[1][0]), file(row[1][1])]] }
-             .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-             .into { read_files_fastqc; read_files_summary; read_files_multiqc; read_files_star_fusion; read_files_fusioncatcher; 
-                     read_files_gfusion; read_files_fusion_inspector; read_files_ericscript; read_files_pizzly; read_files_squid }
-     }
- } else {
-     Channel
-         .fromFilePairs( params.reads, size: params.singleEnd ? 1 : 2 )
-         .ifEmpty { exit 1, "Cannot find any reads matching: ${params.reads}\nNB: Path needs to be enclosed in quotes!\nIf this is single-end data, please specify --singleEnd on the command line." }
-         .into { read_files_fastqc; read_files_summary; read_files_multiqc; read_files_star_fusion; read_files_fusioncatcher; 
-                     read_files_gfusion; read_files_fusion_inspector; read_files_ericscript; read_files_pizzly; read_files_squid }
- }
+Channel
+    .fromFilePairs( params.reads, size: params.singleEnd ? 1 : 2 )
+    .ifEmpty { exit 1, "Cannot find any reads matching: ${params.reads}\nNB: Path needs to be enclosed in quotes!\nIf this is single-end data, please specify --singleEnd on the command line." }
+    .into { read_files_fastqc; read_files_summary; read_files_multiqc; read_files_star_fusion; read_files_fusioncatcher; 
+            read_files_gfusion; read_files_fusion_inspector; read_files_ericscript; read_files_pizzly; read_files_squid }
 
 
 // Header log info
-log.info """=======================================================
-                                          ,--./,-.
-          ___     __   __   __   ___     /,-._.--~\'
-    |\\ | |__  __ /  ` /  \\ |__) |__         }  {
-    | \\| |       \\__, \\__/ |  \\ |___     \\`-._,-`-,
-                                          `._,._,\'
-
-nf-core/rnafusion v${workflow.manifest.version}"
-======================================================="""
+log.info nfcore_logo
 def summary = [:]
 summary['Pipeline Name']  = 'nf-core/rnafusion'
 summary['Pipeline Version'] = workflow.manifest.version
 summary['Run Name']     = custom_runName ?: workflow.runName
 summary['Reads']        = params.reads
 summary['Fasta Ref']    = params.fasta
+summary['GTF Ref']      = params.gtf
+summary['STAR Index']   = params.star_index ? params.star_index : 'Not specified, building'
+summary['Tools']        = params.running_tools.size() == 0 ? 'None' : params.running_tools.join(", ")
 summary['Data Type']    = params.singleEnd ? 'Single-End' : 'Paired-End'
 summary['Max Memory']   = params.max_memory
 summary['Max CPUs']     = params.max_cpus
@@ -261,6 +263,46 @@ ${summary.collect { k,v -> "            <dt>$k</dt><dd><samp>${v ?: '<span style
 }
 
 /*************************************************************
+ * PREPROCESSING
+ ************************************************************/
+
+/*
+ * Build STAR index
+ */
+if (params.star_index) {
+    Channel
+        .fromPath(params.star_index)
+        .ifEmpty { exit 1, "STAR index not found: ${params.star_index}" }
+        .into { star_index_squid; star_index_star_fusion }
+} else {
+    process build_star_index {
+        tag "$fasta"
+        publishDir "${params.outdir}/star_index", mode: 'copy'
+
+        input:
+        file fasta
+        file gtf
+
+        output:
+        file "star" into star_index_squid, star_index_star_fusion
+
+        script:
+        def avail_mem = task.memory ? "--limitGenomeGenerateRAM ${task.memory.toBytes() - 100000000}" : ''
+        """
+        mkdir star
+        STAR \\
+            --runMode genomeGenerate \\
+            --runThreadN ${task.cpus} \\
+            --sjdbGTFfile ${gtf} \\
+            --sjdbOverhang ${params.read_length - 1} \\
+            --genomeDir star/ \\
+            --genomeFastaFiles ${fasta} \\
+            $avail_mem
+        """
+    }
+}
+
+/*************************************************************
  * Fusion pipeline
  ************************************************************/
 
@@ -276,37 +318,46 @@ process star_fusion {
 
     input:
     set val(name), file(reads) from read_files_star_fusion
-    file reference from star_fusion_ref.collect()
+    file star_index_star_fusion
+    file reference from star_fusion_ref
 
     output:
     file '*fusion_predictions.tsv' into star_fusion_fusions
-    file '*' into star_fusion_output
+    file '*.{tsv,txt}' into star_fusion_output
 
     script:
-    if (params.singleEnd) {
-        """
-        STAR-Fusion \\
-            --genome_lib_dir ${reference} \\
-            --left_fq ${reads[0]} \\
-            --CPU  ${task.cpus} \\
-            --examine_coding_effect \\
-            --output_dir .
-        """
-    } else {
-        """
-        STAR-Fusion \\
-            --genome_lib_dir ${reference} \\
-            --left_fq ${reads[0]} \\
-            --right_fq ${reads[1]} \\
-            --CPU  ${task.cpus} \\
-            --examine_coding_effect \\
-            --output_dir .
-        """
-    } 
+    def avail_mem = task.memory ? "--limitBAMsortRAM ${task.memory.toBytes() - 100000000}" : ''
+    option = params.singleEnd ? "--left_fq ${reads[0]}" : "--left_fq ${reads[0]} --right_fq ${reads[1]}"
+    """
+    STAR \\
+        --genomeDir ${star_index_star_fusion} \\
+        --readFilesIn ${reads} \\
+        --twopassMode Basic \\
+        --outReadsUnmapped None \\
+        --chimSegmentMin 12 \\
+        --chimJunctionOverhangMin 12 \\
+        --alignSJDBoverhangMin 10 \\
+        --alignMatesGapMax 100000 \\
+        --alignIntronMax 100000 \\
+        --chimSegmentReadGapMax 3 \\
+        --alignSJstitchMismatchNmax 5 -1 5 5 \\
+        --runThreadN ${task.cpus} \\
+        --outSAMstrandField intronMotif ${avail_mem} \\
+        --readFilesCommand zcat \\
+        --chimOutJunctionFormat 1
+
+    STAR-Fusion \\
+        --genome_lib_dir ${reference} \\
+        -J Chimeric.out.junction \\
+        ${option} \\
+        --CPU ${task.cpus} \\
+        --examine_coding_effect \\
+        --output_dir .
+    """
 }
 
 /*
- * Fusion Catcher
+ * Fusioncatcher
  */
 process fusioncatcher {
     tag "$name"
@@ -317,35 +368,23 @@ process fusioncatcher {
 
     input:
     set val(name), file(reads) from read_files_fusioncatcher
-    file data_dir from fusioncatcher_ref.collect()
+    file data_dir from fusioncatcher_ref
 
     output:
     file 'final-list_candidate-fusion-genes.txt' into fusioncatcher_fusions
-    file '*' into fusioncatcher_output
+    file '*.{txt,zip,log}' into fusioncatcher_output
 
     script:
-    if (params.singleEnd) {
-        """
-        fusioncatcher \\
-            -d ${data_dir} \\
-            -i ${reads[0]} \\
-            --threads ${task.cpus} \\
-            -o . \\
-            --skip-blat \\
-            --single-end \\
-            ${params.fc_extra_options}
-        """
-    } else {
-        """
-        fusioncatcher \\
-            -d ${data_dir} \\
-            -i ${reads[0]},${reads[1]} \\
-            --threads ${task.cpus} \\
-            -o . \\
-            --skip-blat \\
-            ${params.fc_extra_options}
-        """
-    }
+    option = params.singleEnd ? reads[0] : "${reads[0]},${reads[1]}"
+    """
+    fusioncatcher \\
+        -d ${data_dir} \\
+        -i ${option} \\
+        --threads ${task.cpus} \\
+        -o . \\
+        --skip-blat \\
+        ${params.fc_extra_options}
+    """
 }
 
 /*
@@ -356,28 +395,26 @@ process ericscript {
     publishDir "${params.outdir}/tools/Ericscript", mode: 'copy'
 
     when:
-    params.ericscript || (params.ericscript && params.test)
+    params.ericscript && (!params.singleEnd || params.test)
 
     input:
     set val(name), file(reads) from read_files_ericscript
-    file reference from ericscript_ref.collect()
+    file reference from ericscript_ref
 
     output:
-    file './tmp/fusions.results.total.tsv' into ericscript_fusions
-    file '*' into ericscript_output
+    file './tmp/fusions.results.filtered.tsv' into ericscript_fusions
+    file './tmp/fusions.results.total.tsv' into ericscript_output
 
     script:
-    if (!params.singleEnd) {
-        """
-        ericscript.pl \\
-            -db ${reference} \\
-            -name fusions \\
-            -p ${task.cpus} \\
-            -o ./tmp \\
-            ${reads[0]} \\
-            ${reads[1]}
-        """
-    }
+    """
+    ericscript.pl \\
+        -db ${reference} \\
+        -name fusions \\
+        -p ${task.cpus} \\
+        -o ./tmp \\
+        ${reads[0]} \\
+        ${reads[1]}
+    """
 }
 
 /*
@@ -388,31 +425,29 @@ process pizzly {
     publishDir "${params.outdir}/tools/Pizzly", mode: 'copy'
 
     when:
-    params.pizzly || (params.pizzly && params.test)
+    params.pizzly && (!params.singleEnd || params.test)
 
     input:
     set val(name), file(reads) from read_files_pizzly
-    file fasta from pizzly_fasta.collect()
-    file gtf from pizzly_gtf.collect()
+    file fasta from pizzly_fasta
+    file gtf from pizzly_gtf
     
     output:
-    file '*.unfiltered.json' into pizzly_fusions
-    file '*.{json,txt,tsv,fasta}' into pizzly_output
+    file 'pizzly_fusions.json' into pizzly_fusions
+    file '*.{json,txt}' into pizzly_output
 
     script:
-    if (!params.singleEnd) {
-        """
-        kallisto index -i index.idx -k ${params.pizzly_k} ${fasta}
-        kallisto quant -t ${task.cpus} -i index.idx --fusion -o output ${reads[0]} ${reads[1]}
-        pizzly -k ${params.pizzly_k} \\
-            --gtf ${gtf} \\
-            --cache index.cache.txt \\
-            --align-score 2 \\
-            --insert-size 400 \\
-            --fasta ${fasta} \\
-            --output pizzly_fusions output/fusion.txt
-        """
-    }
+    """
+    kallisto index -i index.idx -k ${params.pizzly_k} ${fasta}
+    kallisto quant -t ${task.cpus} -i index.idx --fusion -o output ${reads[0]} ${reads[1]}
+    pizzly -k ${params.pizzly_k} \\
+        --gtf ${gtf} \\
+        --cache index.cache.txt \\
+        --align-score 2 \\
+        --insert-size 400 \\
+        --fasta ${fasta} \\
+        --output pizzly_fusions output/fusion.txt
+    """
 }
 
 /*
@@ -423,32 +458,32 @@ process squid {
     publishDir "${params.outdir}/tools/Squid", mode: 'copy'
 
     when:
-    params.squid || (params.squid && params.test)
+    params.squid && (!params.singleEnd || params.test)
 
     input:
     set val(name), file(reads) from read_files_squid
-    file index from star_index.collect()
+    file star_index_squid
     file gtf
     
     output:
     file '*_annotated.txt' into squid_fusions
-    file '*' into squid_output
+    file '*.txt' into squid_output
 
     script:
     def avail_mem = task.memory ? "--limitBAMsortRAM ${task.memory.toBytes() - 100000000}" : ''
     """
     STAR \\
-        --genomeDir ${index} \\
+        --genomeDir ${star_index_squid} \\
         --sjdbGTFfile ${gtf} \\
         --runThreadN ${task.cpus} \\
         --readFilesIn ${reads[0]} ${reads[1]} \\
         --twopassMode Basic \\
         --chimOutType SeparateSAMold --chimSegmentMin 20 --chimJunctionOverhangMin 12 --alignSJDBoverhangMin 10 --outReadsUnmapped Fastx --outSAMstrandField intronMotif \\
-        --outSAMtype BAM Unsorted ${avail_mem} \\
+        --outSAMtype BAM SortedByCoordinate ${avail_mem} \\
         --readFilesCommand zcat
-    samtools sort Aligned.out.bam > Aligned.out.sorted.bam
-    samtools view -Shb Chimeric.out.sam > Chimeric.out.bam
-    squid -b Aligned.out.sorted.bam -c Chimeric.out.bam -o fusions
+    mv Aligned.sortedByCoord.out.bam ${name}Aligned.sortedByCoord.out.bam
+    samtools view -bS Chimeric.out.sam > ${name}Chimeric.out.bam
+    squid -b ${name}Aligned.sortedByCoord.out.bam -c ${name}Chimeric.out.bam -o fusions
     AnnotateSQUIDOutput.py ${gtf} fusions_sv.txt fusions_annotated.txt
     """
 }
@@ -477,13 +512,14 @@ process summary {
     file '*.html' into report
     
     script:
+    extra = params.tool_cutoff ? "-t ${params.tool_cutoff}" : "" 
     """
     transformer.py -i ${fusioncatcher} -t fusioncatcher
     transformer.py -i ${star_fusion} -t star_fusion
     transformer.py -i ${ericscript} -t ericscript
     transformer.py -i ${pizzly} -t pizzly
     transformer.py -i ${squid} -t squid
-    generate_report.py fusions.txt summary.yaml -s ${name} -o .
+    generate_report.py fusions.txt summary.yaml -s ${name} -o . ${extra}
     """
 }
 
@@ -499,15 +535,15 @@ process fusion_inspector {
     publishDir "${params.outdir}/tools/FusionInspector", mode: 'copy'
 
     when:
-    params.fusion_inspector || (params.fusion_inspector && params.test)
+    params.fusion_inspector && (!params.singleEnd || params.test)
 
     input:
     set val(name), file(reads) from read_files_fusion_inspector
-    file reference from fusion_inspector_ref.collect()
+    file reference from fusion_inspector_ref
     file summary_fusions
 
     output:
-    file '*' into fusion_inspector_output
+    file '*.{fa,gtf,bed,bam,bai,txt}' into fusion_inspector_output
 
     script:
     """
